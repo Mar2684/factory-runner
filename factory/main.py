@@ -87,7 +87,7 @@ class Score(agents.Hook):
 
     async def post_agent_turn(self, ctx, answer):
         run = await ctx.sandbox.execute(
-            "cd /workspace && python3 -m unittest test_noyau",
+            "cd /workspace && python3 -m unittest test_inconnu",
             timeout_seconds=120,
         )
         sortie = ((run.stdout or "") + (run.stderr or "")).strip()
