@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -13,6 +14,7 @@ from mistralai import agents
 PRIX = {
     "mistral-large-4": (0.7, 2.1),      # Le Chonk — Architect + Coder (phase apprentissage)
     "mistral-small-2603": (0.15, 0.6),  # Mistral Small 4 — Vigie
+    "ci-externe": (0.0, 0.0),            # station déterministe : aucun modèle, gratuit
 }
 
 JOURNAL = Path(__file__).parent / "journal.jsonl"
@@ -41,7 +43,9 @@ Tu reçois des instructions de l'Architect. Écris le code dans ton espace de tr
 - crée les fichiers demandés, dans l'ordre demandé ;
 - la logique métier vit dans le noyau ; la coquille ne fait que la brancher ;
 - les tests du noyau utilisent unittest (module standard, aucune installation) ;
-- avant de rendre ton rapport, lance les tests toi-même et corrige ce qui échoue.
+- avant de rendre ton rapport, lance les tests toi-même et corrige ce qui échoue ;
+- NE TOUCHE JAMAIS au répertoire .github/ : la station CI appartient à la factory,
+  pas au Coder.
 
 LIVRAISON (après que tes tests passent) :
 - clone le dépôt {REPO_LIVRAISON} (le jeton est déjà configuré, utilise simplement
@@ -51,7 +55,9 @@ LIVRAISON (après que tes tests passent) :
 - commit et pousse la branche ;
 - ouvre une pull request vers main (titre = la mission, description = plan et
   critères d'acceptation) — utilise gh si disponible, sinon l'API GitHub ;
-- rends un rapport bref : fichiers créés, résultat des tests, et l'URL de la PR."""
+- rends un rapport bref : fichiers créés, résultat des tests, et l'URL de la PR.
+- pour une correction après échec de la CI externe : corrige SUR LA MÊME BRANCHE
+  et pousse, la CI se relancera. Ne recrée jamais une seconde PR pour la même mission."""
 
 INSTRUCTIONS_VIGIE = """Tu es la Vigie de la Mistral Agent Factory.
 
@@ -132,6 +138,42 @@ def ecrire_ligne(mission_id, tour, station, verdict, model, tokens):
     return cout
 
 
+def appel_api_github(chemin: str) -> dict:
+    """Appel anonyme à l'API GitHub (le dépôt de livraison est public)."""
+    requete = urllib.request.Request(
+        f"https://api.github.com{chemin}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "factory-runner"},
+    )
+    with urllib.request.urlopen(requete, timeout=30) as reponse:
+        return json.load(reponse)
+
+
+async def attendre_ci_externe(pr_url: str) -> tuple[str, str]:
+    """Attend le verdict de la CI GitHub Actions sur la PR (10 minutes max).
+    Rend (verdict, détails)."""
+    numero = pr_url.rstrip("/").split("/")[-1]
+    pr = await asyncio.to_thread(appel_api_github, f"/repos/{REPO_LIVRAISON}/pulls/{numero}")
+    sha = pr["head"]["sha"]
+    print(f"   CI externe : branche {pr['head']['ref']} (head {sha[:7]}) — attente…")
+    for tentative in range(1, 31):
+        await asyncio.sleep(20)
+        runs = await asyncio.to_thread(
+            appel_api_github,
+            f"/repos/{REPO_LIVRAISON}/actions/runs?head_sha={sha}&per_page=10",
+        )
+        liste = runs.get("workflow_runs", [])
+        if not liste:
+            continue  # la PR vient d'être poussée : pas encore de run enregistré
+        if any(r["status"] != "completed" for r in liste):
+            print(f"   CI externe en cours… ({tentative}/30)")
+            continue
+        en_echec = [r for r in liste if r.get("conclusion") != "success"]
+        if not en_echec:
+            return "PASS", "Tous les runs GitHub Actions sont verts."
+        return "CHANGES", "Runs en échec : " + ", ".join(r["html_url"] for r in en_echec)
+    return "CHANGES", "Timeout : la CI externe n'a pas rendu de verdict en 10 minutes."
+
+
 compteur = Compteur()
 compteur_vigie = Compteur()
 
@@ -185,11 +227,34 @@ MAX_ECHECS_AVANT_VIGIE = 3
 async def main() -> None:
     mission_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     session = await agent.start_session()
-    dossier = []
+    dossier: list[str] = []
     echecs = 0
     tour = 0
     message = MISSION
     total_usd = 0.0
+
+    async def decision_vigie() -> str:
+        nonlocal total_usd
+        print("=== VIGIE APPELÉE (3 échecs consécutifs) ===")
+        match await vigie.run(
+            "Mission : " + MISSION + "\n\nHistorique des tours :\n\n" + "\n\n".join(dossier)
+        ):
+            case agents.Completed(output=Verdict() as v):
+                decision, justification = v.decision, v.justification
+            case agents.Completed(output=agents.InvalidOutput(error=erreur)):
+                decision = "ESCALADE"
+                justification = f"Verdict Vigie invalide ({erreur}) — escalade par prudence."
+            case autre:
+                decision = "ESCALADE"
+                justification = f"La Vigie n'a pas répondu ({type(autre).__name__}) — escalade par prudence."
+        total_usd += ecrire_ligne(mission_id, tour, "vigie", decision, "mistral-small-2603", compteur_vigie.delta())
+        print(f"Vigie : {decision} — {justification}")
+        if decision == "ESCALADE":
+            print("\n=== ESCALADE VERS MARIUS — DOSSIER COMPLET ===")
+            print("\n\n".join(dossier))
+            print(f"\nJustification de la Vigie : {justification}")
+        return decision
+
     try:
         while True:
             tour += 1
@@ -199,41 +264,50 @@ async def main() -> None:
             reussi = texte.startswith("VERDICT CI PASS")
             verdict = "PASS" if reussi else "CHANGES"
             total_usd += ecrire_ligne(mission_id, tour, "ci", verdict, "mistral-large-4", compteur.delta())
-            if reussi:
-                print("=== MISSION ACCOMPLIE ===")
-                pr = re.search(rf"https://github\.com/{REPO_LIVRAISON}/pull/\d+", texte)
-                if pr:
-                    ecrire_ligne(mission_id, tour, "livraison", "PASS", "mistral-large-4", (0, 0))
-                    print(f"=== PULL REQUEST OUVERTE : {pr.group(0)} ===")
-                    print("→ À toi de la relire et de la fusionner, Marius.")
-                else:
-                    print("⚠ Aucune URL de PR trouvée dans le rapport — vérifie le dépôt de livraison.")
-                break
-            echecs += 1
-            dossier.append(f"— Tour {tour} : verdict CHANGES —\n{texte[:800]}")
-            if echecs >= MAX_ECHECS_AVANT_VIGIE:
-                print("=== VIGIE APPELÉE (3 échecs consécutifs) ===")
-                match await vigie.run(
-                    "Mission : " + MISSION + "\n\nHistorique des tours :\n\n" + "\n\n".join(dossier)
-                ):
-                    case agents.Completed(output=Verdict() as v):
-                        decision, justification = v.decision, v.justification
-                    case agents.Completed(output=agents.InvalidOutput(error=erreur)):
-                        decision = "ESCALADE"
-                        justification = f"Verdict Vigie invalide ({erreur}) — escalade par prudence."
-                    case autre:
-                        decision = "ESCALADE"
-                        justification = f"La Vigie n'a pas répondu ({type(autre).__name__}) — escalade par prudence."
-                total_usd += ecrire_ligne(mission_id, tour, "vigie", decision, "mistral-small-2603", compteur_vigie.delta())
-                print(f"Vigie : {decision} — {justification}")
-                if decision == "ESCALADE":
-                    print("\n=== ESCALADE VERS MARIUS — DOSSIER COMPLET ===")
-                    print("\n\n".join(dossier))
-                    print(f"\nJustification de la Vigie : {justification}")
+            pr_match = re.search(rf"https://github\.com/{REPO_LIVRAISON}/pull/\d+", texte)
+
+            if not reussi:
+                echecs += 1
+                dossier.append(f"— Tour {tour} : CI sandbox CHANGES —\n{texte[:800]}")
+                if echecs >= MAX_ECHECS_AVANT_VIGIE and await decision_vigie() == "ESCALADE":
                     break
+                message = (
+                    "Le verdict CI (sandbox) est CHANGES. Diagnostique à partir des tests "
+                    "échoués et relance le coder avec des corrections ciblées. "
+                    "Ne réécris pas tout : corrige."
+                )
+                continue
+
+            if not pr_match:
+                print("⚠ Tests verts mais aucune PR dans le rapport — on réclame la livraison.")
+                echecs += 1
+                dossier.append(f"— Tour {tour} : CI sandbox PASS mais pas de PR livrée —")
+                if echecs >= MAX_ECHECS_AVANT_VIGIE and await decision_vigie() == "ESCALADE":
+                    break
+                message = (
+                    "Les tests passent mais aucune pull request n'a été ouverte. "
+                    f"Termine la livraison sur {REPO_LIVRAISON} : branche mission/..., push, "
+                    "PR, et l'URL de la PR dans ton rapport."
+                )
+                continue
+
+            # CI sandbox PASS + PR livrée : on attend le verdict de la CI externe.
+            ext_verdict, details = await attendre_ci_externe(pr_match.group(0))
+            total_usd += ecrire_ligne(mission_id, tour, "ci-externe", ext_verdict, "ci-externe", (0, 0))
+            if ext_verdict == "PASS":
+                print("=== CI EXTERNE VERTE ===")
+                print(f"=== PR PRÊTE POUR MARIUS : {pr_match.group(0)} ===")
+                print("→ Relis-la et fusionne-la.")
+                break
+            print(f"⚠ CI externe en échec : {details}")
+            echecs += 1
+            dossier.append(f"— Tour {tour} : CI externe GitHub Actions en échec —\n{details}")
+            if echecs >= MAX_ECHECS_AVANT_VIGIE and await decision_vigie() == "ESCALADE":
+                break
             message = (
-                "Le verdict CI est CHANGES. Diagnostique à partir des tests échoués et "
-                "relance le coder avec des corrections ciblées. Ne réécris pas tout : corrige."
+                f"La CI externe GitHub Actions échoue sur la pull request ({details}). "
+                "Diagnostique et corrige SUR LA MÊME BRANCHE : pousse les corrections, "
+                "la CI se relancera automatiquement. Ne recrée pas une nouvelle PR."
             )
     finally:
         await session.cancel()
