@@ -1,0 +1,8 @@
+{"ts": "2026-11-13T10:26:02+00:00", "mission_id": "20261113-101906", "tour": 1, "station": "ci", "verdict": "PASS", "model": "mistral-large-4", "tokens_in": 817615, "tokens_out": 35015, "cout_usd": 0.6459}
+{"ts": "2026-11-13T11:48:58+00:00", "mission_id": "20261113-114510", "tour": 1, "station": "ci", "verdict": "PASS", "model": "mistral-large-4", "tokens_in": 328472, "tokens_out": 16352, "cout_usd": 0.2643}
+{"ts": "2026-11-13T11:57:47+00:00", "mission_id": "20261113-115234", "tour": 1, "station": "ci", "verdict": "PASS", "model": "mistral-large-4", "tokens_in": 424077, "tokens_out": 26043, "cout_usd": 0.3515}
+{"ts": "2026-11-13T12:06:09+00:00", "mission_id": "20261113-115851", "tour": 1, "station": "ci", "verdict": "PASS", "model": "mistral-large-4", "tokens_in": 647134, "tokens_out": 32249, "cout_usd": 0.5207}
+{"ts": "2026-11-13T12:20:48+00:00", "mission_id": "20261113-121340", "tour": 1, "station": "ci", "verdict": "CHANGES", "model": "mistral-large-4", "tokens_in": 721300, "tokens_out": 35934, "cout_usd": 0.5804}
+{"ts": "2026-11-13T12:27:33+00:00", "mission_id": "20261113-121340", "tour": 2, "station": "ci", "verdict": "CHANGES", "model": "mistral-large-4", "tokens_in": 634879, "tokens_out": 21138, "cout_usd": 0.4888}
+{"ts": "2026-11-13T12:31:16+00:00", "mission_id": "20261113-121340", "tour": 3, "station": "ci", "verdict": "CHANGES", "model": "mistral-large-4", "tokens_in": 516499, "tokens_out": 13252, "cout_usd": 0.3894}
+{"ts": "2026-11-13T12:31:17+00:00", "mission_id": "20261113-121340", "tour": 3, "station": "vigie", "verdict": "ESCALADE", "model": "mistral-small-2603", "tokens_in": 3328, "tokens_out": 75, "cout_usd": 0.0005}

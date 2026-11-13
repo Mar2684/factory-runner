@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 from mistralai import agents
 
@@ -63,20 +63,18 @@ class Verdict(BaseModel):
 class Compteur(agents.Hook):
     """Additionne les tokens de chaque appel modèle de l'agent concerné."""
 
-    def __init__(self):
-        self.tokens_in = 0
-        self.tokens_out = 0
-        self._dernier = (0, 0)
+    _tokens_in: int = PrivateAttr(0)
+    _tokens_out: int = PrivateAttr(0)
+    _dernier: tuple = PrivateAttr((0, 0))
 
     async def post_llm_call(self, ctx, reply):
         if reply.usage is not None:
-            self.tokens_in += reply.usage.input_tokens
-            self.tokens_out += reply.usage.output_tokens
+            self._tokens_in += reply.usage.input_tokens
+            self._tokens_out += reply.usage.output_tokens
 
     def delta(self):
-        """Tokens consommés depuis le dernier appel à delta()."""
-        point = (self.tokens_in, self.tokens_out)
-        d = (self.tokens_in - self._dernier[0], self.tokens_out - self._dernier[1])
+        point = (self._tokens_in, self._tokens_out)
+        d = (self._tokens_in - self._dernier[0], self._tokens_out - self._dernier[1])
         self._dernier = point
         return d
 
@@ -87,7 +85,7 @@ class Score(agents.Hook):
 
     async def post_agent_turn(self, ctx, answer):
         run = await ctx.sandbox.execute(
-            "cd /workspace && python3 -m unittest test_inconnu",
+            "cd /workspace && python3 -m unittest discover -p 'test_*.py'",
             timeout_seconds=120,
         )
         sortie = ((run.stdout or "") + (run.stderr or "")).strip()
@@ -96,7 +94,7 @@ class Score(agents.Hook):
         else:
             verdict = "VERDICT CI CHANGES\n\nSortie des tests :\n" + sortie[-600:]
         return agents.hook.PostAgentTurnHookAccept(
-            acceptance=agents.hook.ReplaceAssistantContent(
+            acceptance=agents.hook.ReplaceAssistantContent(                                 
                 content=[agents.TextContentBlock(text=f"{verdict}\n\n{answer.text}")]
             )
         )
