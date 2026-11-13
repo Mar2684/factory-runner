@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -15,10 +16,11 @@ PRIX = {
 }
 
 JOURNAL = Path(__file__).parent / "journal.jsonl"
+REPO_LIVRAISON = "Mar2684/factory-deliveries"
 
 INSTRUCTIONS_ARCHITECT = """Tu es l'Architect de la Mistral Agent Factory.
 
-Ta mission : transformer une demande de projet en plan, puis la faire réaliser.
+Ta mission : transformer une demande de projet en plan, puis la faire réaliser et livrer.
 
 Processus imposé, dans l'ordre, à chaque tour :
 1. PLAN : découpe le projet en NOYAU (logique pure, testable par tests unitaires,
@@ -27,19 +29,29 @@ Processus imposé, dans l'ordre, à chaque tour :
    pour le Coder : fichiers à créer, ordre, contraintes. Pas de sur-spécification.
 2. CODAGE : démarre exactement UNE session du subagent « coder » avec les
    instructions complètes du plan, et attends son rapport. Ne code jamais toi-même.
-3. RAPPORT : termine ton tour par un rapport bref (plan, puis rapport du Coder).
+3. RAPPORT : termine ton tour par un rapport bref (plan, rapport du Coder,
+   et l'URL de la pull request s'il en a ouvert une).
    Un verdict de tests (VERDICT CI PASS ou CHANGES) sera ajouté en première ligne
    de ta réponse. S'il est CHANGES, diagnostique à partir des tests échoués et
    relance le coder avec des corrections ciblées — ne réécris pas tout."""
 
-INSTRUCTIONS_CODER = """Tu es le Coder de la Mistral Agent Factory.
+INSTRUCTIONS_CODER = f"""Tu es le Coder de la Mistral Agent Factory.
 
 Tu reçois des instructions de l'Architect. Écris le code dans ton espace de travail :
 - crée les fichiers demandés, dans l'ordre demandé ;
 - la logique métier vit dans le noyau ; la coquille ne fait que la brancher ;
 - les tests du noyau utilisent unittest (module standard, aucune installation) ;
-- avant de rendre ton rapport, lance les tests toi-même et corrige ce qui échoue ;
-- rends un rapport bref : fichiers créés, résultat des tests."""
+- avant de rendre ton rapport, lance les tests toi-même et corrige ce qui échoue.
+
+LIVRAISON (après que tes tests passent) :
+- clone le dépôt {REPO_LIVRAISON} (le jeton est déjà configuré, utilise simplement
+  git clone https://github.com/{REPO_LIVRAISON}.git) ;
+- crée une branche nommée mission/<identifiant-court-de-la-mission> ;
+- copie les fichiers du projet dedans (sans données d'exécution comme tasks.json) ;
+- commit et pousse la branche ;
+- ouvre une pull request vers main (titre = la mission, description = plan et
+  critères d'acceptation) — utilise gh si disponible, sinon l'API GitHub ;
+- rends un rapport bref : fichiers créés, résultat des tests, et l'URL de la PR."""
 
 INSTRUCTIONS_VIGIE = """Tu es la Vigie de la Mistral Agent Factory.
 
@@ -94,7 +106,7 @@ class Score(agents.Hook):
         else:
             verdict = "VERDICT CI CHANGES\n\nSortie des tests :\n" + sortie[-600:]
         return agents.hook.PostAgentTurnHookAccept(
-            acceptance=agents.hook.ReplaceAssistantContent(                                 
+            acceptance=agents.hook.ReplaceAssistantContent(
                 content=[agents.TextContentBlock(text=f"{verdict}\n\n{answer.text}")]
             )
         )
@@ -127,13 +139,20 @@ agent = agents.Agent(
     model="mistral-large-4",
     name="factory",
     instructions=INSTRUCTIONS_ARCHITECT,
-    environment=agents.MistralSandbox(idle_timeout_seconds=600),
+    environment=agents.MistralSandbox(
+        idle_timeout_seconds=600,
+        network=agents.Network.all(),  # requis : le sandbox doit atteindre github.com
+        header_bindings=(
+            # Jeton GitHub éphémère (1 h) via le connector de Marius — jamais dans le sandbox.
+            agents.GitHubBinding(repos=(REPO_LIVRAISON,)),
+        ),
+    ),
     subagents=[
         agents.Subagent(
             name="coder",
             description=(
-                "Implémente le plan de l'Architect : écrit le code et les tests "
-                "dans le workspace, lance les tests, et rend compte."
+                "Implémente le plan de l'Architect : écrit le code et les tests, "
+                "les lance, puis livre une pull request sur le dépôt de livraison."
             ),
             instructions=INSTRUCTIONS_CODER,
             model="mistral-large-4",  # phase 1 d'apprentissage (spec)
@@ -155,8 +174,12 @@ MISSION = (
     "Petite application web de liste de tâches (to-do list) en Python. "
     "Un utilisateur peut ajouter une tâche, la marquer comme faite, supprimer une tâche, "
     "et voir la liste. Persistance dans un fichier JSON. Type : app-web. "
-    "Les tests du noyau utilisent unittest (module standard)."
+    "Les tests du noyau utilisent unittest (module standard). "
+    f"Le Coder livre sur le dépôt {REPO_LIVRAISON} : une branche mission/<id-court> "
+    "et une pull request vers main, dont l'URL doit figurer dans le rapport final."
 )
+
+MAX_ECHECS_AVANT_VIGIE = 3
 
 
 async def main() -> None:
@@ -178,11 +201,17 @@ async def main() -> None:
             total_usd += ecrire_ligne(mission_id, tour, "ci", verdict, "mistral-large-4", compteur.delta())
             if reussi:
                 print("=== MISSION ACCOMPLIE ===")
-                print(texte[:1500])
+                pr = re.search(rf"https://github\.com/{REPO_LIVRAISON}/pull/\d+", texte)
+                if pr:
+                    ecrire_ligne(mission_id, tour, "livraison", "PASS", "mistral-large-4", (0, 0))
+                    print(f"=== PULL REQUEST OUVERTE : {pr.group(0)} ===")
+                    print("→ À toi de la relire et de la fusionner, Marius.")
+                else:
+                    print("⚠ Aucune URL de PR trouvée dans le rapport — vérifie le dépôt de livraison.")
                 break
             echecs += 1
             dossier.append(f"— Tour {tour} : verdict CHANGES —\n{texte[:800]}")
-            if echecs >= 3:
+            if echecs >= MAX_ECHECS_AVANT_VIGIE:
                 print("=== VIGIE APPELÉE (3 échecs consécutifs) ===")
                 match await vigie.run(
                     "Mission : " + MISSION + "\n\nHistorique des tours :\n\n" + "\n\n".join(dossier)
